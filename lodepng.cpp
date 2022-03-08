@@ -460,10 +460,10 @@ static void writeBitsReversed(LodePNGBitWriter* writer, unsigned value, size_t n
 
 typedef struct {
   const unsigned char* data;
-  size_t size; /*size of data in bytes*/
-  size_t bitsize; /*size of data in bits, end of valid bp values, should be 8*size*/
-  size_t bp;
-  unsigned buffer; /*buffer for reading bits. NOTE: 'unsigned' must support at least 32 bits*/
+  size_t size; /*size of data in bytes*/ //data字节大小
+  size_t bitsize; /*size of data in bits, end of valid bp values, should be 8*size*/ //data位大小，为字节*8
+  size_t bp;    //已解码数据
+  unsigned buffer; /*buffer for reading bits. NOTE: 'unsigned' must support at least 32 bits*///正在被缓冲的位码流
 } LodePNGBitReader;
 
 /* data size argument is in bytes. Returns error if size too large causing overflow */
@@ -630,13 +630,13 @@ static const unsigned CLCL_ORDER[NUM_CODE_LENGTH_CODES]
 Huffman tree struct, containing multiple representations of the tree
 */
 typedef struct HuffmanTree {
-  unsigned* codes; /*the huffman codes (bit patterns representing the symbols)*/
-  unsigned* lengths; /*the lengths of the huffman codes*/
-  unsigned maxbitlen; /*maximum number of bits a single code can get*/
-  unsigned numcodes; /*number of symbols in the alphabet = number of codes*/
-  /* for reading only */
-  unsigned char* table_len; /*length of symbol from lookup table, or max length if secondary lookup needed*/
-  unsigned short* table_value; /*value of symbol from lookup table, or pointer to secondary table if needed*/
+  unsigned* codes; /*the huffman codes (bit patterns representing the symbols)*/    ////大小：numcodes 
+  unsigned* lengths; /*the lengths of the huffman codes*/                           //大小：numcodes
+  unsigned maxbitlen; /*maximum number of bits a single code can get*/              //固定时为0x0f
+  unsigned numcodes; /*number of symbols in the alphabet = number of codes*/        //固定时大小时:ll树288  长度树32
+  /* for reading only */ //由上述生成的查找表，解码时直接查表即可
+  unsigned char* table_len; /*length of symbol from lookup table, or max length if secondary lookup needed*/  //固定时大小：1u << FIRSTBITS根位数=9，即512
+  unsigned short* table_value; /*value of symbol from lookup table, or pointer to secondary table if needed*/ //固定时大小：1u << FIRSTBITS根位数=9，即512
 } HuffmanTree;
 
 static void HuffmanTree_init(HuffmanTree* tree) {
@@ -781,7 +781,7 @@ static unsigned HuffmanTree_makeTable(HuffmanTree* tree) {
 Second step for the ...makeFromLengths and ...makeFromFrequencies functions.
 numcodes, lengths and maxbitlen must already be filled in correctly. return
 value is error.
-*/
+*/ //建立码表tree->codes，生成table_len，table_value以在解码时调用HuffmanTree_makeTable得到解码需要的查找表
 static unsigned HuffmanTree_makeFromLengths2(HuffmanTree* tree) {
   unsigned* blcount;
   unsigned* nextcode;
@@ -794,9 +794,9 @@ static unsigned HuffmanTree_makeFromLengths2(HuffmanTree* tree) {
   if(!tree->codes || !blcount || !nextcode) error = 83; /*alloc fail*/
 
   if(!error) {
-    for(n = 0; n != tree->maxbitlen + 1; n++) blcount[n] = nextcode[n] = 0;
+    for(n = 0; n != tree->maxbitlen + 1; n++) blcount[n] = nextcode[n] = 0;//初始化为0
     /*step 1: count number of instances of each code length*/
-    for(bits = 0; bits != tree->numcodes; ++bits) ++blcount[tree->lengths[bits]];
+    for(bits = 0; bits != tree->numcodes; ++bits) ++blcount[tree->lengths[bits]];//blcount累加上当前出现的长度
     /*step 2: generate the nextcode values*/
     for(bits = 1; bits <= tree->maxbitlen; ++bits) {
       nextcode[bits] = (nextcode[bits - 1] + blcount[bits - 1]) << 1u;
@@ -828,7 +828,7 @@ static unsigned HuffmanTree_makeFromLengths(HuffmanTree* tree, const unsigned* b
   unsigned i;
   tree->lengths = (unsigned*)lodepng_malloc(numcodes * sizeof(unsigned));
   if(!tree->lengths) return 83; /*alloc fail*/
-  for(i = 0; i != numcodes; ++i) tree->lengths[i] = bitlen[i];
+  for(i = 0; i != numcodes; ++i) tree->lengths[i] = bitlen[i];//memcpy
   tree->numcodes = (unsigned)numcodes; /*number of symbols*/
   tree->maxbitlen = maxbitlen;
   return HuffmanTree_makeFromLengths2(tree);
@@ -1071,11 +1071,11 @@ static unsigned generateFixedDistanceTree(HuffmanTree* tree) {
 returns the code. The bit reader must already have been ensured at least 15 bits
 */
 static unsigned huffmanDecodeSymbol(LodePNGBitReader* reader, const HuffmanTree* codetree) {
-  unsigned short code = peekBits(reader, FIRSTBITS);
-  unsigned short l = codetree->table_len[code];
-  unsigned short value = codetree->table_value[code];
+  unsigned short code = peekBits(reader, FIRSTBITS);//从缓冲区读取对应掩码数据
+  unsigned short l = codetree->table_len[code];//查到的，被压缩数据的长度
+  unsigned short value = codetree->table_value[code];//查询到的值
   if(l <= FIRSTBITS) {
-    advanceBits(reader, l);
+    advanceBits(reader, l); //位读取了，往前推进,即buffer右移l位
     return value;
   } else {
     advanceBits(reader, FIRSTBITS);
@@ -1114,35 +1114,35 @@ static unsigned getTreeInflateDynamic(HuffmanTree* tree_ll, HuffmanTree* tree_d,
   unsigned* bitlen_cl = 0;
   HuffmanTree tree_cl; /*the code tree for code length codes (the huffman tree for compressed huffman trees)*/
 
-  if(reader->bitsize - reader->bp < 14) return 49; /*error: the bit pointer is or will go past the memory*/
-  ensureBits17(reader, 14);
+  if(reader->bitsize - reader->bp < 14) return 49; /*error: the bit pointer is or will go past the memory*/ //
+  ensureBits17(reader, 14); //取出14b: 5b长度+5b距离+4b码长HCLEN
 
   /*number of literal/length codes + 257. Unlike the spec, the value 257 is added to it here already*/
-  HLIT =  readBits(reader, 5) + 257;
+  HLIT =  readBits(reader, 5) + 257; //取出5bit长度
   /*number of distance codes. Unlike the spec, the value 1 is added to it here already*/
   HDIST = readBits(reader, 5) + 1;
   /*number of code length codes. Unlike the spec, the value 4 is added to it here already*/
-  HCLEN = readBits(reader, 4) + 4;
+  HCLEN = readBits(reader, 4) + 4;//HCLEN最大=2^4+4=20;
 
   bitlen_cl = (unsigned*)lodepng_malloc(NUM_CODE_LENGTH_CODES * sizeof(unsigned));
   if(!bitlen_cl) return 83 /*alloc fail*/;
 
   HuffmanTree_init(&tree_cl);
 
-  while(!error) {
+  while(!error) {//建表
     /*read the code length codes out of 3 * (amount of code length codes) bits*/
     if(lodepng_gtofl(reader->bp, HCLEN * 3, reader->bitsize)) {
       ERROR_BREAK(50); /*error: the bit pointer is or will go past the memory*/
     }
-    for(i = 0; i != HCLEN; ++i) {
+    for(i = 0; i != HCLEN; ++i) {//每次取3b缓冲至bitlen_cl，直到给定码长
       ensureBits9(reader, 3); /*out of bounds already checked above */
       bitlen_cl[CLCL_ORDER[i]] = readBits(reader, 3);
     }
-    for(i = HCLEN; i != NUM_CODE_LENGTH_CODES; ++i) {
+    for(i = HCLEN; i != NUM_CODE_LENGTH_CODES; ++i) {//未使用部分清为0
       bitlen_cl[CLCL_ORDER[i]] = 0;
     }
 
-    error = HuffmanTree_makeFromLengths(&tree_cl, bitlen_cl, NUM_CODE_LENGTH_CODES, 7);
+    error = HuffmanTree_makeFromLengths(&tree_cl, bitlen_cl, NUM_CODE_LENGTH_CODES, 7); //得到查表值
     if(error) break;
 
     /*now we can use this tree to read the lengths for the tree that this function will return*/
@@ -1243,13 +1243,13 @@ static unsigned inflateHuffmanBlock(ucvector* out, LodePNGBitReader* reader,
   const size_t reserved_size = 260; /* must be at least 258 for max length, and a few extra for adding a few extra literals */
   int done = 0;
 
-  if(!ucvector_reserve(out, out->size + reserved_size)) return 83; /*alloc fail*/
+  if(!ucvector_reserve(out, out->size + reserved_size)) return 83; /*alloc fail*/ //out扩容了260个
 
-  HuffmanTree_init(&tree_ll);
-  HuffmanTree_init(&tree_d);
+  HuffmanTree_init(&tree_ll);//copy长度与下个符号树
+  HuffmanTree_init(&tree_d);//距离树
 
-  if(btype == 1) error = getTreeInflateFixed(&tree_ll, &tree_d);
-  else /*if(btype == 2)*/ error = getTreeInflateDynamic(&tree_ll, &tree_d, reader);
+  if(btype == 1) error = getTreeInflateFixed(&tree_ll, &tree_d);//标准定义的固定哈夫曼树
+  else /*if(btype == 2)*/ error = getTreeInflateDynamic(&tree_ll, &tree_d, reader);//从数据中读取以创建动态哈夫曼树
 
 
   while(!error && !done) /*decode all symbols until end reached, breaks at end code*/ {
@@ -1257,25 +1257,27 @@ static unsigned inflateHuffmanBlock(ucvector* out, LodePNGBitReader* reader,
     unsigned code_ll;
     /* ensure enough bits for 2 huffman code reads (15 bits each): if the first is a literal, a second literal is read at once. This
     appears to be slightly faster, than ensuring 20 bits here for 1 huffman symbol and the potential 5 extra bits for the length symbol.*/
-    ensureBits32(reader, 30);
-    code_ll = huffmanDecodeSymbol(reader, &tree_ll);
-    if(code_ll <= 255) {
+    ensureBits32(reader, 30);//继续读取字节(已读取的不变)至buffer，确保最少30个bit
+    code_ll = huffmanDecodeSymbol(reader, &tree_ll);//得到解压后的长度与下个符号组合值
+    if(code_ll <= 255) {//表示下个压缩字节数
       /*slightly faster code path if multiple literals in a row*/
-      out->data[out->size++] = (unsigned char)code_ll;
-      code_ll = huffmanDecodeSymbol(reader, &tree_ll);
+      out->data[out->size++] = (unsigned char)code_ll; //压入真实数据
+      code_ll = huffmanDecodeSymbol(reader, &tree_ll); //继续下个压缩数据解码
     }
-    if(code_ll <= 255) /*literal symbol*/ {
-      out->data[out->size++] = (unsigned char)code_ll;
-    } else if(code_ll >= FIRST_LENGTH_CODE_INDEX && code_ll <= LAST_LENGTH_CODE_INDEX) /*length code*/ {
+    if(code_ll <= 255) /*literal symbol*/ {//表示下个压缩字节数
+      out->data[out->size++] = (unsigned char)code_ll;//继续下个压缩数据解码
+    }
+    //值为257,285时，表示长度了，此从表里得到具体数据
+    else if(code_ll >= FIRST_LENGTH_CODE_INDEX && code_ll <= LAST_LENGTH_CODE_INDEX) /*length code*/ {
       unsigned code_d, distance;
       unsigned numextrabits_l, numextrabits_d; /*extra bits for length and distance*/
       size_t start, backward, length;
 
       /*part 1: get length base*/
-      length = LENGTHBASE[code_ll - FIRST_LENGTH_CODE_INDEX];
+      length = LENGTHBASE[code_ll - FIRST_LENGTH_CODE_INDEX];// 257-285值表示的长度
 
       /*part 2: get extra bits and add the value of that to length*/
-      numextrabits_l = LENGTHEXTRA[code_ll - FIRST_LENGTH_CODE_INDEX];
+      numextrabits_l = LENGTHEXTRA[code_ll - FIRST_LENGTH_CODE_INDEX];//此长度不能真实表达需要copy的长度时，从数据流中获取附加的长度(又是差分及可变长度)
       if(numextrabits_l != 0) {
         /* bits already ensured above */
         ensureBits25(reader, 5);
@@ -1283,8 +1285,8 @@ static unsigned inflateHuffmanBlock(ucvector* out, LodePNGBitReader* reader,
       }
 
       /*part 3: get distance code*/
-      ensureBits32(reader, 28); /* up to 15 for the huffman symbol, up to 13 for the extra bits */
-      code_d = huffmanDecodeSymbol(reader, &tree_d);
+      ensureBits32(reader, 28); /* up to 15 for the huffman symbol, up to 13 for the extra bits *///继续读取至缓冲以获到copy距离
+      code_d = huffmanDecodeSymbol(reader, &tree_d); //解压得到距离代码
       if(code_d > 29) {
         if(code_d <= 31) {
           ERROR_BREAK(18); /*error: invalid distance code (30-31 are never used)*/
@@ -1292,37 +1294,37 @@ static unsigned inflateHuffmanBlock(ucvector* out, LodePNGBitReader* reader,
           ERROR_BREAK(16); /*error: tried to read disallowed huffman symbol*/
         }
       }
-      distance = DISTANCEBASE[code_d];
+      distance = DISTANCEBASE[code_d];//距离代码查表获到实际copy距离
 
       /*part 4: get extra bits from distance*/
-      numextrabits_d = DISTANCEEXTRA[code_d];
+      numextrabits_d = DISTANCEEXTRA[code_d];//实际copy距离不足以表达实际copy距离时，从从数据流中获取附加的距离数据(又是差分及可变长度，省到家了)
       if(numextrabits_d != 0) {
         /* bits already ensured above */
         distance += readBits(reader, numextrabits_d);
       }
 
       /*part 5: fill in all the out[n] values based on the length and dist*/
-      start = out->size;
+      start = out->size; //从以经解码的数里，copy数据，start为目标会增加， 即滑动窗口
       if(distance > start) ERROR_BREAK(52); /*too long backward distance*/
-      backward = start - distance;
+      backward = start - distance;//往前coopy位置
 
-      out->size += length;
-      if(distance < length) {
+      out->size += length;//预置copy了这么多个
+      if(distance < length) {//需要copy的数据很近且现在数据不够copy了，表示后继被解码的数据也面要copy(即窗口向前滑动)，需一个个copy
         size_t forward;
-        lodepng_memcpy(out->data + start, out->data + backward, distance);
+        lodepng_memcpy(out->data + start, out->data + backward, distance);//够的部分直接memcpy
         start += distance;
-        for(forward = distance; forward < length; ++forward) {
+        for(forward = distance; forward < length; ++forward) {//不够部分窗口向前滑动
           out->data[start++] = out->data[backward++];
         }
-      } else {
+      } else {//很靠前足够copy了，直接memcpy
         lodepng_memcpy(out->data + start, out->data + backward, length);
       }
-    } else if(code_ll == 256) {
+    } else if(code_ll == 256) {//此值表示结束了
       done = 1; /*end code, finish the loop*/
     } else /*if(code_ll == INVALIDSYMBOL)*/ {
       ERROR_BREAK(16); /*error: tried to read disallowed huffman symbol*/
     }
-    if(out->allocsize - out->size < reserved_size) {
+    if(out->allocsize - out->size < reserved_size) {//解压后的数据超限了，再申请260个
       if(!ucvector_reserve(out, out->size + reserved_size)) ERROR_BREAK(83); /*alloc fail*/
     }
     /*check if any of the ensureBits above went out of bounds*/
@@ -1374,22 +1376,22 @@ static unsigned inflateNoCompression(ucvector* out, LodePNGBitReader* reader,
 
   return error;
 }
-
+//解压ucvector, 形参分别为：目标out, 输入数据流，输入数居流大小， 配置
 static unsigned lodepng_inflatev(ucvector* out,
                                  const unsigned char* in, size_t insize,
                                  const LodePNGDecompressSettings* settings) {
   unsigned BFINAL = 0;
   LodePNGBitReader reader;
-  unsigned error = LodePNGBitReader_init(&reader, in, insize);
+  unsigned error = LodePNGBitReader_init(&reader, in, insize); //缓存至reader,后继用此
 
   if(error) return error;
 
   while(!BFINAL) {
     unsigned BTYPE;
     if(reader.bitsize - reader.bp < 3) return 52; /*error, bit pointer will jump past memory*/
-    ensureBits9(&reader, 3);
-    BFINAL = readBits(&reader, 1);
-    BTYPE = readBits(&reader, 2);
+    ensureBits9(&reader, 3); //读出至缓存最少3bit，实际双字
+    BFINAL = readBits(&reader, 1);//从缓存取出1bit,同时向下移位1bit，BFINAL此位置位表示结束
+    BTYPE = readBits(&reader, 2);//继续从缓存取出2bit
 
     if(BTYPE == 3) return 20; /*error: invalid BTYPE*/
     else if(BTYPE == 0) error = inflateNoCompression(out, &reader, settings); /*no compression*/
@@ -2161,7 +2163,7 @@ static unsigned adler32(const unsigned char* data, unsigned len) {
 /* ////////////////////////////////////////////////////////////////////////// */
 
 #ifdef LODEPNG_COMPILE_DECODER
-
+//这里从IDAT域后的首字开始，解压数据
 static unsigned lodepng_zlib_decompressv(ucvector* out,
                                          const unsigned char* in, size_t insize,
                                          const LodePNGDecompressSettings* settings) {
@@ -2191,11 +2193,11 @@ static unsigned lodepng_zlib_decompressv(ucvector* out,
     return 26;
   }
 
-  error = inflatev(out, in + 2, insize - 2, settings);
+  error = inflatev(out, in + 2, insize - 2, settings); //去除数据头了
   if(error) return error;
 
   if(!settings->ignore_adler32) {
-    unsigned ADLER32 = lodepng_read32bitInt(&in[insize - 4]);
+    unsigned ADLER32 = lodepng_read32bitInt(&in[insize - 4]);//字节转u32,校验压缩数据是否正确
     unsigned checksum = adler32(out->data, (unsigned)(out->size));
     if(checksum != ADLER32) return 58; /*error, adler checksum not correct, data must be corrupted*/
   }
@@ -3311,7 +3313,7 @@ static void getPixelColorRGBA8(unsigned char* r, unsigned char* g,
     }
   }
 }
-
+//转换为RGBA8
 /*Similar to getPixelColorRGBA8, but with all the for loops inside of the color
 mode test cases, optimized to convert the colors much faster, when converting
 to the common case of RGBA with 8 bit per channel. buffer must be RGBA with
@@ -3511,7 +3513,7 @@ static void getPixelColorRGBA16(unsigned short* r, unsigned short* g, unsigned s
     *a = 256u * in[i * 8 + 6] + in[i * 8 + 7];
   }
 }
-
+//色系转换
 unsigned lodepng_convert(unsigned char* out, const unsigned char* in,
                          const LodePNGColorMode* mode_out, const LodePNGColorMode* mode_in,
                          unsigned w, unsigned h) {
